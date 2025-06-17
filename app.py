@@ -1,113 +1,149 @@
 from flask import Flask, jsonify, request
-import yfinance as yf
 from flask_cors import CORS
+import yfinance as yf
 import datetime
 
 app = Flask(__name__)
 CORS(app)
 
-# In-memory favorites and recent searches (no DB for simplicity)
-favorites = set()
-recent_searches = []
+USER_DATA = {
+    "favorites": set(),
+    "recent_searches": []
+}
 
-# Company list for autocomplete (this can be extended)
-COMPANY_LIST = [
-    {"symbol": "AAPL", "name": "Apple Inc.", "category": "Technology"},
-    {"symbol": "TSLA", "name": "Tesla, Inc.", "category": "Automotive"},
-    {"symbol": "MSFT", "name": "Microsoft Corporation", "category": "Technology"},
-    {"symbol": "JNJ", "name": "Johnson & Johnson", "category": "Healthcare"},
-    {"symbol": "JPM", "name": "JPMorgan Chase & Co.", "category": "Financial"},
-    {"symbol": "PFE", "name": "Pfizer Inc.", "category": "Healthcare"},
-    {"symbol": "GOOGL", "name": "Alphabet Inc.", "category": "Technology"},
-    {"symbol": "AMZN", "name": "Amazon.com, Inc.", "category": "Consumer Discretionary"},
-    {"symbol": "BAC", "name": "Bank of America Corporation", "category": "Financial"},
-    {"symbol": "NFLX", "name": "Netflix, Inc.", "category": "Communication Services"},
-]
+COMPANY_LIST = []
+
+def load_sp500_companies():
+    import pandas as pd
+    global COMPANY_LIST
+    try:
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        tables = pd.read_html(url)
+        df = tables[0]
+        companies = []
+        for _, row in df.iterrows():
+            companies.append({
+                "symbol": row["Symbol"],
+                "name": row["Security"],
+                "category": row.get("GICS Sector", "Unknown")
+            })
+        COMPANY_LIST = companies
+    except Exception as e:
+        print(f"Error loading companies: {e}")
+        COMPANY_LIST = []
+
+def get_date_n_days_ago(n):
+    d = datetime.date.today() - datetime.timedelta(days=n)
+    return d.isoformat()
+
+def get_date_today():
+    return datetime.date.today().isoformat()
 
 @app.route("/api/companies")
 def companies():
     search = request.args.get("search", "").lower()
-    filtered = [c for c in COMPANY_LIST if search in c["symbol"].lower() or search in c["name"].lower()]
-    # Fetch prices with yfinance
-    for c in filtered:
-        ticker = yf.Ticker(c["symbol"])
-        try:
-            price = ticker.info.get("regularMarketPrice")
-            c["livePrice"] = round(price, 2) if price else None
-        except:
-            c["livePrice"] = None
-    # Update recent searches
-    if search and search.upper() not in recent_searches:
-        recent_searches.append(search.upper())
-        if len(recent_searches) > 10:
-            recent_searches.pop(0)
-    return jsonify(filtered)
+    if not COMPANY_LIST:
+        load_sp500_companies()
+    filtered = []
+    if search == "":
+        filtered = COMPANY_LIST[:50]
+    else:
+        filtered = [c for c in COMPANY_LIST if search in c["symbol"].lower() or search in c["name"].lower()]
+
+    symbols = [c["symbol"] for c in filtered[:50]]
+    prices_map = {}
+    try:
+        tickers = yf.Tickers(" ".join(symbols))
+        for sym in symbols:
+            try:
+                info = tickers.tickers[sym].info
+                price = info.get("regularMarketPrice")
+                prices_map[sym] = round(price, 2) if price else None
+            except:
+                prices_map[sym] = None
+    except:
+        prices_map = {}
+
+    result = []
+    for company in filtered[:50]:
+        comp = company.copy()
+        comp["livePrice"] = prices_map.get(comp["symbol"])
+        result.append(comp)
+
+    s_upper = search.upper()
+    if search and s_upper not in USER_DATA["recent_searches"]:
+        USER_DATA["recent_searches"].append(s_upper)
+        if len(USER_DATA["recent_searches"]) > 20:
+            USER_DATA["recent_searches"].pop(0)
+
+    return jsonify(result)
 
 @app.route("/api/favorites", methods=["GET", "POST"])
-def favorite_stocks():
-    global favorites
+def favorites():
     if request.method == "GET":
-        return jsonify(list(favorites))
+        return jsonify(list(USER_DATA["favorites"]))
     else:
         data = request.get_json()
-        new_favs = data.get("favorites", [])
-        favorites = set(new_favs)
-        return jsonify({"success": True, "favorites": list(favorites)})
+        favs = data.get("favorites", [])
+        USER_DATA["favorites"] = set(favs)
+        return jsonify({"success": True, "favorites": list(USER_DATA["favorites"])})
 
 @app.route("/api/news")
 def news():
-    # For demo, fetch latest news for each favorite using yfinance news attribute or mock news
-    news_items = []
-    for sym in favorites:
-        ticker = yf.Ticker(sym)
+    news_list = []
+    for symbol in USER_DATA["favorites"]:
+        ticker = yf.Ticker(symbol)
         try:
-            # yfinance does not provide news in all versions, so this is just a placeholder:
-            # Use your own source or API for real news.
-            info = ticker.info
-            news_items.append({
-                "newsId": sym + "_1",
-                "company": sym,
-                "headline": f"{info.get('shortName', sym)} latest update",
-                "content": info.get('longBusinessSummary', 'No summary available.'),
-                "timestamp": datetime.datetime.now().isoformat(),
-                "category": info.get("sector", "General"),
-                "url": info.get("website", "")
-            })
-        except:
-            continue
-    return jsonify(news_items)
-
-@app.route("/api/alerts")
-def alerts():
-    # Generate mock alerts for favorites
-    alerts_list = []
-    for sym in favorites:
-        ticker = yf.Ticker(sym)
-        try:
-            price_change = ticker.info.get("regularMarketChangePercent", 0)
-            volume = ticker.info.get("volume", 0)
-            if abs(price_change) >= 3:
-                alerts_list.append({
-                    "alertId": sym + "_alert",
-                    "company": sym,
-                    "priceChange": price_change,
-                    "volume": volume,
-                    "timestamp": datetime.datetime.now().isoformat()
+            news_data = ticker.news
+            if not news_data:
+                continue
+            for item in news_data[:10]:
+                news_list.append({
+                    "newsId": item.get("uuid", "") or item.get("id", "") or str(item.get("datetime", "")),
+                    "company": symbol,
+                    "headline": item.get("title", ""),
+                    "content": item.get("summary", ""),
+                    "timestamp": datetime.datetime.utcfromtimestamp(item.get("datetime", 0)).isoformat() if item.get("datetime") else "",
+                    "url": item.get("link", ""),
+                    "category": "News"
                 })
         except:
             continue
-    return jsonify(alerts_list)
+    news_list.sort(key=lambda x: x["timestamp"], reverse=True)
+    return jsonify(news_list[:50])
+
+@app.route("/api/alerts")
+def alerts():
+    alert_list = []
+    for symbol in USER_DATA["favorites"]:
+        ticker = yf.Ticker(symbol)
+        try:
+            change_pct = ticker.info.get("regularMarketChangePercent") or 0
+            volume = ticker.info.get("volume") or 0
+            if abs(change_pct) >= 3:
+                alert_list.append({
+                    "alertId": f"{symbol}_alert",
+                    "company": symbol,
+                    "priceChange": change_pct,
+                    "volume": volume,
+                    "timestamp": datetime.datetime.utcnow().isoformat()
+                })
+        except:
+            continue
+    return jsonify(alert_list)
 
 @app.route("/api/recent-searches")
-def recent():
-    return jsonify(recent_searches[-5:])
+def recent_searches():
+    return jsonify(USER_DATA["recent_searches"][-5:])
 
 @app.route("/api/recommendations")
 def recommendations():
-    # Recommend stocks not in favorites or recent searches, in Technology category
-    exclude = favorites.union(set(recent_searches))
-    recs = [c for c in COMPANY_LIST if c["symbol"] not in exclude and c["category"] == "Technology"]
-    return jsonify(recs[:5])
+    exclude = USER_DATA["favorites"].union(set(USER_DATA["recent_searches"]))
+    recommended = [c for c in COMPANY_LIST if c["symbol"] not in exclude and c["category"] == "Technology"]
+    return jsonify(recommended[:5])
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    load_sp500_companies()
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
