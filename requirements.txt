@@ -1,5 +1,5 @@
 Flask==2.3.2
 flask-cors==3.0.10
 yfinance==0.2.30
-pandas==2.0.3
+pandas==1.5.3  # Use a stable version
 requests==2.31.0
