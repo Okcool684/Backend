@@ -6,6 +6,7 @@ import datetime
 app = Flask(__name__)
 CORS(app)
 
+# In-memory user data; in production, use persistent DB
 USER_DATA = {
     "favorites": set(),
     "recent_searches": []
@@ -143,7 +144,9 @@ def recommendations():
     return jsonify(recommended[:5])
 
 if __name__ == "__main__":
+    # Preload companies on startup
     load_sp500_companies()
     import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
