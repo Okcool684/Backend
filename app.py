@@ -2,8 +2,13 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import yfinance as yf
 import datetime
+
 import os
-os.makedirs("/opt/render/.cache/py-yfinance", exist_ok=True)
+
+# Create the cache directory for yfinance
+cache_dir = "/opt/render/.cache/py-yfinance"
+os.makedirs(cache_dir, exist_ok=True)
+
 
 app = Flask(__name__)
 CORS(app)
