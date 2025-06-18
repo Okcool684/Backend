@@ -1,13 +1,13 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import yfinance as yf
 import datetime
 
 import os
-
+os.environ["XDG_CACHE_HOME"] = "/tmp/.cache"
 # Create the cache directory for yfinance
-cache_dir = "/opt/render/.cache/py-yfinance"
-os.makedirs(cache_dir, exist_ok=True)
+os.makedirs("/tmp/.cache/py-yfinance", exist_ok=True)
+
+import yfinance as yf
 
 
 app = Flask(__name__)
