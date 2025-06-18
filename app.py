@@ -1,29 +1,30 @@
-from flask import Flask, jsonify, request
-from flask_cors import CORS
-import datetime
 
+import datetime
+import requests
 import os
 os.environ["XDG_CACHE_HOME"] = "/tmp/.cache"
 # Create the cache directory for yfinance
 os.makedirs("/tmp/.cache/py-yfinance", exist_ok=True)
 
 import yfinance as yf
-
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-# In-memory user data; in production, use persistent DB
+# Replace with your NewsAPI key (https://newsapi.org/)
+NEWSAPI_KEY = "161644ecac3746edbf8da10031aa6c70"
+
 USER_DATA = {
     "favorites": set(),
     "recent_searches": []
 }
 
-COMPANY_LIST = []
+# Load company list (S&P 500) once on startup, from Wikipedia
+import pandas as pd
 
-def load_sp500_companies():
-    import pandas as pd
-    global COMPANY_LIST
+def load_companies():
     try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         tables = pd.read_html(url)
@@ -35,56 +36,44 @@ def load_sp500_companies():
                 "name": row["Security"],
                 "category": row.get("GICS Sector", "Unknown")
             })
-        COMPANY_LIST = companies
+        return companies
     except Exception as e:
         print(f"Error loading companies: {e}")
-        COMPANY_LIST = []
+        return []
 
-def get_date_n_days_ago(n):
-    d = datetime.date.today() - datetime.timedelta(days=n)
-    return d.isoformat()
-
-def get_date_today():
-    return datetime.date.today().isoformat()
+COMPANY_LIST = load_companies()
 
 @app.route("/api/companies")
 def companies():
-    search = request.args.get("search", "").lower()
-    if not COMPANY_LIST:
-        load_sp500_companies()
-    filtered = []
-    if search == "":
+    query = request.args.get("search", "").lower()
+    if query == "":
         filtered = COMPANY_LIST[:50]
     else:
-        filtered = [c for c in COMPANY_LIST if search in c["symbol"].lower() or search in c["name"].lower()]
+        filtered = [c for c in COMPANY_LIST if query in c["symbol"].lower() or query in c["name"].lower()]
 
     symbols = [c["symbol"] for c in filtered[:50]]
-    prices_map = {}
+    prices = {}
     try:
         tickers = yf.Tickers(" ".join(symbols))
-        for sym in symbols:
-            try:
-                info = tickers.tickers[sym].info
-                price = info.get("regularMarketPrice")
-                prices_map[sym] = round(price, 2) if price else None
-            except:
-                prices_map[sym] = None
-    except:
-        prices_map = {}
+        for symbol in symbols:
+            info = tickers.tickers[symbol].info
+            price = info.get("regularMarketPrice")
+            prices[symbol] = round(price, 2) if price else None
+    except Exception:
+        prices = {s: None for s in symbols}
 
-    result = []
-    for company in filtered[:50]:
-        comp = company.copy()
-        comp["livePrice"] = prices_map.get(comp["symbol"])
-        result.append(comp)
+    # Append live price
+    for c in filtered[:50]:
+        c["livePrice"] = prices.get(c["symbol"])
 
-    s_upper = search.upper()
-    if search and s_upper not in USER_DATA["recent_searches"]:
-        USER_DATA["recent_searches"].append(s_upper)
+    # Track recent searches
+    q_upper = query.upper()
+    if query and q_upper not in USER_DATA["recent_searches"]:
+        USER_DATA["recent_searches"].append(q_upper)
         if len(USER_DATA["recent_searches"]) > 20:
             USER_DATA["recent_searches"].pop(0)
 
-    return jsonify(result)
+    return jsonify(filtered[:50])
 
 @app.route("/api/favorites", methods=["GET", "POST"])
 def favorites():
@@ -96,49 +85,62 @@ def favorites():
         USER_DATA["favorites"] = set(favs)
         return jsonify({"success": True, "favorites": list(USER_DATA["favorites"])})
 
+def get_news_for_symbol(symbol):
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "q": symbol,
+        "apiKey": NEWSAPI_KEY,
+        "pageSize": 10,
+        "sortBy": "publishedAt",
+        "language": "en"
+    }
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("articles", [])
+    except Exception as e:
+        print(f"News fetch error for {symbol}: {e}")
+        return []
+
 @app.route("/api/news")
 def news():
     news_list = []
     for symbol in USER_DATA["favorites"]:
-        ticker = yf.Ticker(symbol)
-        try:
-            news_data = ticker.news
-            if not news_data:
-                continue
-            for item in news_data[:10]:
-                news_list.append({
-                    "newsId": item.get("uuid", "") or item.get("id", "") or str(item.get("datetime", "")),
-                    "company": symbol,
-                    "headline": item.get("title", ""),
-                    "content": item.get("summary", ""),
-                    "timestamp": datetime.datetime.utcfromtimestamp(item.get("datetime", 0)).isoformat() if item.get("datetime") else "",
-                    "url": item.get("link", ""),
-                    "category": "News"
-                })
-        except:
-            continue
-    news_list.sort(key=lambda x: x["timestamp"], reverse=True)
+        articles = get_news_for_symbol(symbol)
+        for item in articles:
+            news_list.append({
+                "newsId": item.get("url"),
+                "company": symbol,
+                "headline": item.get("title"),
+                "content": item.get("description") or "",
+                "timestamp": item.get("publishedAt"),
+                "url": item.get("url"),
+                "category": "News"
+            })
+    news_list = sorted(news_list, key=lambda x: x["timestamp"] or "", reverse=True)
     return jsonify(news_list[:50])
 
 @app.route("/api/alerts")
 def alerts():
-    alert_list = []
+    alerts_list = []
     for symbol in USER_DATA["favorites"]:
-        ticker = yf.Ticker(symbol)
         try:
-            change_pct = ticker.info.get("regularMarketChangePercent") or 0
-            volume = ticker.info.get("volume") or 0
-            if abs(change_pct) >= 3:
-                alert_list.append({
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            price_change = info.get("regularMarketChangePercent") or 0
+            volume = info.get("volume") or 0
+            if abs(price_change) >= 3:
+                alerts_list.append({
                     "alertId": f"{symbol}_alert",
                     "company": symbol,
-                    "priceChange": change_pct,
+                    "priceChange": price_change,
                     "volume": volume,
                     "timestamp": datetime.datetime.utcnow().isoformat()
                 })
-        except:
-            continue
-    return jsonify(alert_list)
+        except Exception as e:
+            print(f"Error getting alert for {symbol}: {e}")
+    return jsonify(alerts_list)
 
 @app.route("/api/recent-searches")
 def recent_searches():
@@ -147,13 +149,31 @@ def recent_searches():
 @app.route("/api/recommendations")
 def recommendations():
     exclude = USER_DATA["favorites"].union(set(USER_DATA["recent_searches"]))
-    recommended = [c for c in COMPANY_LIST if c["symbol"] not in exclude and c["category"] == "Technology"]
-    return jsonify(recommended[:5])
+    recs = [c for c in COMPANY_LIST if c["symbol"] not in exclude and "Technology" in c["category"]]
+    return jsonify(recs[:5])
+
+@app.route("/api/company-details/<symbol>")
+def company_details(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        details = {
+            "symbol": info.get("symbol"),
+            "shortName": info.get("shortName"),
+            "regularMarketPrice": info.get("regularMarketPrice"),
+            "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh"),
+            "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
+            "marketCap": info.get("marketCap"),
+            "trailingPE": info.get("trailingPE"),
+            "trailingEps": info.get("trailingEps"),
+            "dividendYield": info.get("dividendYield"),
+            "sector": info.get("sector"),
+            "website": info.get("website"),
+            "longBusinessSummary": info.get("longBusinessSummary"),
+        }
+        return jsonify(details)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    # Preload companies on startup
-    load_sp500_companies()
-    import os
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
+    app.run(host="0.0.0.0", port=5000)
