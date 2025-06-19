@@ -1,6 +1,5 @@
-Flask==2.3.2
+Flask==2.1.2
 flask-cors==3.0.10
-yfinance==0.2.37
-google-generativeai==0.3.2
-agno==1.6.3
 waitress==2.1.2
+agno==0.0.6
+requests==2.26.0
