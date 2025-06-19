@@ -3,3 +3,4 @@ phi-tools==0.0.7  # Replace with the latest version if available
 yfinance==0.1.70  # Replace with the latest version if available
 requests==2.26.0  # Replace with the latest version if available
 waitress==2.1.2  # Replace with the latest version if available
+werkzeug==2.3.7
