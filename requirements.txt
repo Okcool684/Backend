@@ -1,5 +1,6 @@
 # Correct AI agent framework from GitHub
-phi @ git+https://github.com/phi-ai/phi
+git+https://github.com/phi-ai/phi.git
+
 
 # Flask backend
 Flask==2.1.2
